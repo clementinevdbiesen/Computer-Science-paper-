@@ -1,0 +1,652 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[625]:
+
+
+import numpy as np 
+import pandas as pd
+import json
+from collections import Counter
+import re
+from itertools import combinations
+import math
+from random import shuffle
+from sklearn.cluster import AgglomerativeClustering
+
+
+# ## Extract data
+
+# In[626]:
+
+
+# Specify the JSON file path
+json_file_path = '/Users/Clementine/.spyder-py3/TVs-all-merged.json'
+
+# Open and load the JSON file
+with open(json_file_path, 'r') as json_file:
+    data_full = json.load(json_file)
+
+
+# In[627]:
+
+
+# Define a function that returns only a part of the data
+def bootstrap(data_dict :dict, n_samples):
+    data = {}
+    #Take random key value pairs from the original data
+    while len(data.keys()) < n_samples:
+        random.choice(list(data_dict))
+        key, value = random.choice(list(data_dict.items()))
+        data[key] = value
+    return data
+
+
+# In[628]:
+
+
+#Extract modelID, title and shop for each product
+def get_ID_title_shop(data):
+    modelID = []
+    title = []
+    shop=[]
+    for key in data.keys():
+        for item in data[key]:
+            modelID_list = item['modelID']
+            modelID.append(modelID_list)
+
+            title_list = item['title']
+            title.append(title_list)
+            
+            shop_list = item['shop']
+            shop.append(shop_list)
+    return modelID, title, shop   
+
+
+# In[629]:
+
+
+#Extract brand for each product
+def extract_brand(data):
+    brands = []
+    for key, items_list in data.items():
+        for item in items_list:
+            features_map = item.get('featuresMap', {})
+            brand = features_map.get('Brand', 'Unknown')
+            brands.append(brand)
+    return brands
+
+
+# In[630]:
+
+
+#Extract the feature maps for each product
+def get_features_map(data):
+    features_map_list = []
+    for key, items_list in data.items():
+        for item in items_list:
+            features_map = item.get('featuresMap', {})
+            features_map_list.append(features_map)
+    return features_map_list
+
+
+
+#Count the occurence of features, and extract the most important ones to later use in the signature matrix
+#This part is not used in the end
+
+# def most_important_features(data, top_n=5):
+#     features_map_list=get_features_map(data)
+#     all_features = []    
+#     for features_map in features_map_list:
+#         all_features.extend(features_map.keys())
+
+#     feature_counts = Counter(all_features)
+
+#     # Get the top N features with the highest counts
+#     most_important_features = list(feature_counts.keys())[:top_n]
+        
+#     return most_important_features
+
+
+# In[631]:
+
+
+#Returns a set with modelIDs of duplicate pairs to see how many duplicates there are based on modelID
+def get_duplicate(data):
+    duplicates = []
+    for element in data: 
+        if data.count(element) > 1 and element not in duplicates:
+            duplicates.append(element)
+    return duplicates
+
+
+# ### Data cleaning
+
+# In[632]:
+
+
+#Changes all representations of inch to inch
+def inches(string):
+    a = ['inch', 'Inch', 'inches', 'Inches', '\"', '-inch', '-Inch']
+    for j in a:
+        if j in string:
+            string = string.replace(j, 'inch')
+    return string
+
+#Changes all representations of hertz to hz
+def hertz(string):
+    a = ['Hz', 'hz', 'Hertz', 'hertz', 'HZ', '-hz', '-Hz']
+    for j in a:
+        if j in string:
+            string = string.replace(j, 'hz')
+    return string
+
+#Removes characters other than ,,. and white space
+def interpunction(string): 
+    chars = "!@#$%^&*_+~`;<>/|()[]?-'" 
+    for j in chars:
+        if j in string:
+            string = string.replace(j, '')
+    return string
+
+#Changes all capitalised non-numerical tokens to lower case
+def capitalization(string):
+    return string.lower()
+
+#Removes the shopname from the title because we do not want to compare as they can not be similar
+def remove(string):
+    shop_name = ['amazon', 'newegg.com', 'best buy', 'thenerds']
+    for j in shop_name:
+        if j in string:
+            string = string.replace(j, '')
+    return string
+
+#Removes white spaces
+def del_white_spaces(string):
+    return ''.join(filter(None, string.strip().split(' ')))
+
+#Applies all cleaning operations on a string    
+def clean_title(title):
+    cleaned_titles = [del_white_spaces(remove(capitalization(interpunction(hertz(inches(i)))))) for i in title]
+    return cleaned_titles
+
+
+# ## Functions
+
+# In[647]:
+
+
+#Extract unique model words from a list of titles
+def model_words_title(lists):
+    MW_title = []
+    for i in lists:
+        for j in i.split():
+            match = re.search('([a-z0-9]*(([0-9]+[^0-9, ]+)|([^0-9, ]+[0-9]+))[a-z0-9]*)', j)
+            if match:
+                MW_title.append(match.group()) 
+    return list(set(MW_title))
+
+#Creates model word for each product 
+def model_words_title2(lists):
+    MW_title = []
+    for i in lists:
+        for j in i.split():
+            match = re.search('([a-z0-9]*(([0-9]+[^0-9, ]+)|([^0-9, ]+[0-9]+))[a-z0-9]*)', j)
+            if match:
+                MW_title.append(match.group()) 
+    return list((MW_title))
+
+#Creates a binary matrix with a 1 if the model word is present in the cleaned title
+def binary_mat(MW, cleaned):
+    input_matrix = np.zeros((len(MW), len(cleaned)), dtype=int)
+    for i in range(len(cleaned)):
+        for j in range(len(MW)):
+            if MW[j] in cleaned[i]:
+                input_matrix[j,i] = 1
+            else:
+                input_matrix[j,i] = 0
+    return input_matrix
+
+
+
+#Function that returns a matrix with a 1 if a feature is present and has Yes as value
+#and a 0 if it has No as value or is not present
+def yes_no_matrix(data):
+    features_map_list = get_features_map(data)
+    
+    # Create a list to store the names of features with 'Yes' or 'No' values
+    feature_names = []
+    # Create a dictionary to store the mapping of feature names to their respective index
+    feature_index_map = {}
+    
+    # Populate the feature_names list and feature_index_map
+    for features_map in features_map_list:
+        for key, value in features_map.items():
+            if value in ['Yes', 'No'] and key not in feature_names:
+                feature_names.append(key)
+                feature_index_map[key] = len(feature_names) - 1
+    
+    # Create a binary matrix
+    num_products = len(extract_brand(data))
+    num_features = len(feature_names)
+    input_matrix = np.zeros((num_features, num_products), dtype=int)
+    
+    # Populate the binary matrix
+    for product_index, features_map in enumerate(features_map_list):
+        for key, value in features_map.items():
+            if key in feature_index_map and value in ['Yes', 'No']:
+                feature_index = feature_index_map[key]
+                input_matrix[feature_index, product_index] = 1 if value == 'Yes' else 0
+    
+    return input_matrix 
+
+
+#Creates the signature matrix based on the amount of hashf
+def minHash(binMatrix, hashnumber):  
+    #BinMatrix has a row for each model word and Yes/No feature and each column is a product
+    count = 1
+    num_columns = np.shape(binMatrix)[1]
+    sigMatrix = np.zeros((hashnumber, num_columns))
+    
+    for i in range(hashnumber):
+        #create hash function
+        hashf = np.arange(len(binMatrix) - 1)
+        
+        #Hashf is now a vector with random numbers between 0 to number of products
+        np.random.shuffle(hashf)      
+        
+        for col in range(binMatrix.shape[1]): #iterates over all products
+            for y in range(len(hashf)):    
+                if binMatrix[(hashf[y])][col] == 1:      #if the row is a 1, adds the number of that row
+                    sigMatrix[i][col] = count
+                    count = 1
+                    break
+                elif binMatrix[(hashf[y])][col] == 0:
+                    count = count + 1
+    sigMatrix = sigMatrix.astype(int)                                   
+    return sigMatrix
+
+#Hashes the elements of rows in a band into a string sequence
+def custom_hash(band):
+    return ''.join(map(str, band))
+
+#LSH that returns the candidate pairs found, takes as input the number of bands 
+def lsh(sigMatrix, num_bands):
+    num_rows, num_cols = sigMatrix.shape
+    rows_per_band = num_rows // num_bands
+    
+    #Splits each product column into the specified bands
+    bands = np.array_split(sigMatrix, num_bands, axis=0)
+    
+    potentialPairs = set()
+    
+    for band in bands:
+        hashDict = {}
+        
+        for item, column in enumerate(band.transpose()):
+            hash_col = custom_hash(column)
+            
+            #If the hashed value of the column is already in the dictionairy of pairs, product can be added to the bucket
+            if hash_col in hashDict:
+                hashDict[hash_col] = np.append(hashDict[hash_col], item)
+            #If bucket it is not in the dictionairy yet, you can add a new bucket
+            else:
+                hashDict[hash_col] = np.array([item])
+        #Loop over the buckets of the column
+        for potential_pair in hashDict.values():
+            #If bucket contains more than 1 item 
+            if len(potential_pair) > 1:
+                #Create the pairs and add them to the set of potential pairs
+                for i, item1 in enumerate(potential_pair):
+                    #Compare against all other items
+                    for j in range(i + 1, len(potential_pair)):
+                        #Avoid double comparisons ( no need to compare ba when you already compared ab)
+                        if potential_pair[i] < potential_pair[j]:
+                            pair = tuple(sorted((potential_pair[i], potential_pair[j])))
+                            potentialPairs.add(pair)
+                       
+
+    return potentialPairs
+
+#Returns a list with the pairs out of the LSH pairs that have same brand and different shops
+def candidate_positives(candidate_pairs,data):
+# Get the brands for all products
+    brand_list = extract_brand(data)
+    shop_list = get_ID_title_shop(data)[2]
+
+    # Initialize the list to store model IDs of candidate positives
+    modelID_filtered_pairs = []
+    filtered_pairs=[]
+    modelID_list=get_ID_title_shop(data)[0]
+
+    for index, pair in enumerate(candidate_pairs):
+        prod1 = pair[0]
+        prod2 = pair[1]
+        modelID1 = modelID_list[prod1]
+        modelID2 = modelID_list[prod2]
+
+        if (brand_list[prod1] == brand_list[prod2]) and shop_list[prod1] != shop_list[prod2]:
+            filtered_pairs.append(pair)
+            modelID_filtered_pairs.append(modelID1)
+            modelID_filtered_pairs.append(modelID2)
+
+        elif (brand_list[prod1] == 'Unknown' or brand_list[prod2] == 'Unknown') and shop_list[prod1] != shop_list[prod2]:
+            filtered_pairs.append(pair)
+            modelID_filtered_pairs.append(modelID1)
+            modelID_filtered_pairs.append(modelID2)
+
+    return modelID_filtered_pairs, filtered_pairs       
+
+
+# ## Main functions
+
+# In[699]:
+
+
+#The main code generates all the input for LSH and then performs it 
+def main(data,hashf,num_bands): 
+    
+    #Get data   
+    modelID_list=get_ID_title_shop(data)[0]
+    titlelist=get_ID_title_shop(data)[1]
+    shop_list=get_ID_title_shop(data)[2]
+    brand_list=extract_brand(data)
+
+    #Clean titles
+    cleaned_title=clean_title(titlelist)
+    features=get_features_map(data)
+
+    #Get the model IDs of the pairs that are true duplicates
+    duplicates=get_duplicate(get_ID_title_shop(data)[0])
+
+    #Unique MW list
+    MW=model_words_title(cleaned_title)
+    
+    #MW list for each product
+    MW2=model_words_title2(cleaned_title)
+    
+    #Make a binary matrix with the products as columns and the features with binary "Yes" or "No" response
+    xi=yes_no_matrix(data)
+
+    #Make a binary matrix from the MW in each product title, extended with the yes or no matrix
+    binary_matrix = np.vstack((binary_mat(MW, cleaned_title),xi))
+    
+    #If you do not want to include yes/no matrix, uncomment next line 
+    #binary_matrix=binary_mat(MW,cleaned_title)
+    
+    #Hash the binary matrix into the signature matrix with .. hashfunctions
+    sigMatrix=minHash(binary_matrix,hashf)
+    
+    #Get the candidate pairs from LSH
+    potentialPairs=lsh(sigMatrix, num_bands)
+    
+    #Get the filtered pairs after removing different brand same shop pairs (no clustering yet)
+    filtered_pairs=candidate_positives(potentialPairs,data)[1]
+    filtered_pairs_modelID=candidate_positives(potentialPairs,data)[0]
+    
+    #Return the LSH pairs, sigMatrix, the filtered pairs and the lists with modelwords
+    return potentialPairs, MW, sigMatrix,potentialPairs,MW2,filtered_pairs
+    
+ 
+    
+
+
+# In[675]:
+
+
+#Function that outputs the evaluation metrics 
+def evaluation(candidate_pairs, data):
+    
+    #Get the true duplicates
+    duplicates=get_duplicate(get_ID_title_shop(data)[0])
+    
+    #Get modelID list
+    modelID_list=get_ID_title_shop(data)[0]
+    candidate_modelIDS=[]
+    
+    #Obtain the modelIDs for the candidate pairs to compare with true duplicate modelIDs
+    for index, pair in enumerate(candidate_pairs):
+        prod1 = pair[0]
+        prod2 = pair[1]
+  
+        modelID1 = modelID_list[prod1]
+        modelID2 = modelID_list[prod2]
+        candidate_modelIDS.append(modelID1)
+        candidate_modelIDS.append(modelID2)
+        
+    #True positives, False Negatives and False Positives definition
+    TP=set(candidate_modelIDS).intersection(duplicates)
+    FN=set(duplicates).difference(candidate_modelIDS)
+    FP=set(candidate_modelIDS).difference(duplicates)
+        
+    precision = len(TP) / (len(TP) + len(FP)) if TP or FP else 0
+    recall = len(TP) / (len(TP) + len(FN)) if TP or FN else 0
+    f1_score = 2 * precision * recall / (precision + recall) if precision + recall else 0
+
+    total_possible_comparisons = len(modelID_list) * (len(modelID_list) - 1) / 2 
+    pair_quality = len(TP) / len(candidate_pairs) if candidate_pairs else 0
+    pair_completeness = len(TP) / len(duplicates) if (TP or FN) else 0
+    f1_star = 2 * (pair_quality * pair_completeness) / (pair_quality + pair_completeness) if (pair_quality + pair_completeness) else 0
+
+    fraction = len(candidate_pairs) / total_possible_comparisons
+
+
+    return precision,recall,f1_score,fraction,f1_star,pair_completeness,pair_quality
+    
+
+
+# ## Clustering functions
+
+# In[674]:
+
+
+#Jaccard similarity
+def jaccard(MW1, MW2, length):
+    set1 = set(MW1.split())
+    set2 = set(MW2.split())
+    list1=list(set1)
+    list2=list(set2)
+    shingle1=set(shingles(list1[0],length)) 
+    shingle2=set(shingles(list2[0],length))
+    intersection = len(shingle1.intersection(shingle2))
+    union = len(shingle1.union(shingle2))
+    return intersection / union if union != 0 else 0
+
+#Create shingles from a text input of length=length
+def shingles(text, length):
+    return [text[i:i + length] for i in range(len(text) - length + 1)]
+
+#Make a dissimilarity matrix based on jaccard similarity
+def createDissimilarityMatrix(candidatepairs,data,hashf,num_bands,length):
+    modelID_list=get_ID_title_shop(data)[0]
+    titlelist=get_ID_title_shop(data)[1]
+    shop_list=get_ID_title_shop(data)[2]
+    brand_list=extract_brand(data)
+
+    #Clean title
+    cleaned_title=clean_title(titlelist)
+
+    #Make a binary matrix with the products as columns and the features with binary "Yes" or "No" response
+    xi=yes_no_matrix(data)
+
+    #Get the model IDs that are true duplicates
+    duplicates=get_duplicate(get_ID_title_shop(data)[0])
+
+    #Unique MW list
+    MW=model_words_title(cleaned_title)
+    
+    #MW list for each product
+    MW2=model_words_title2(cleaned_title)
+
+    #Make a binary matrix from the MW in each product title, extended with the yes or no matrix
+    binary_matrix = np.vstack((binary_mat(MW, cleaned_title),xi))
+    #Hash the binary matrix into the signature matrix with .. hashfunctions
+    sigMatrix=minHash(binary_matrix,hashf)
+
+    nItems = len(MW2)
+    result1 = np.full((nItems, nItems), 1000, dtype=float)
+
+    for index,pair in enumerate(candidatepairs):
+        item1 = pair[0]
+        item2 = pair[1]
+        MW1_set=MW2[item1]
+        MW2_set=MW2[item2]
+        
+        #Calculate jaccard distance
+        result1[item1, item2] = 1 - jaccard(MW1_set,MW2_set,length)
+
+        # if brand not the same set simmilarity to 1000
+        if (brand_list[item1] != brand_list[item2]):
+            result1[item1, item2] = 1000
+        # if shop the same set similarity to 1000
+        if shop_list[item1] == shop_list[item2]:
+            result1[item1, item2] = 1000
+
+        #Symmetric matrix    
+        result1[item2, item1] = result1[item1, item2]
+
+    return result1
+
+    
+
+#Use agglomerative clustering with distance treshold t to filter pairs 
+def clusterMethod(dis_mat, t):
+    linkage = AgglomerativeClustering(n_clusters=None, affinity="precomputed",
+                                      linkage='single', distance_threshold=t)
+    clusters = linkage.fit_predict(dis_mat)
+    dictCluster = {}
+    for index, clusternr in enumerate(clusters):
+        if clusternr in dictCluster:
+            dictCluster[clusternr] = np.append(dictCluster[clusternr], index)
+        else:
+            dictCluster[clusternr] = np.array([index])
+    candidate_pairs = set()
+    for potential_pair in dictCluster.values():
+        if len(potential_pair) > 1:
+            for i, item1 in enumerate(potential_pair):
+                for j in range(i + 1, len(potential_pair)):
+                    if (potential_pair[i] < potential_pair[j]):
+                        candidate_pairs.add((potential_pair[i], potential_pair[j]))
+                    else:
+                        candidate_pairs.add((potential_pair[j], potential_pair[i]))
+    print("potential pairs clustering found =", len(candidate_pairs))
+    return candidate_pairs
+
+
+# ## Application
+
+# In[734]:
+
+
+#Perform LSH over multiple band values to find the optimum (without bootstrap and clustering because less time)
+#And compare performance of the LSH pairs, the filtered same brand different shop pairs, and the clustered pairs
+plotfraction1=[]
+plotfraction2=[]
+F1score=[]
+F1star=[]
+quality=[]
+completeness=[]
+
+num_bands_range=[200,250,300,400,500,800]
+hashf=800
+t=0.7
+length=2
+for i in num_bands_range:
+    print(i)
+    result=main(data_full,hashf,i)
+    candidatepairs=result[0]
+    filtered_pairs=result[5]
+    dis_matrix=createDissimilarityMatrix(candidatepairs,data_full,hashf,i,length)
+    clustered_pairs=clusterMethod(dis_matrix,t)
+    evaluated1=evaluation(candidatepairs,data_full)
+    evaluated2=evaluation(filtered_pairs,data_full)
+    evaluated3=evaluation(clustered_pairs,data_full)
+    F1score.append(evaluated1[2])
+    plotfraction1.append(evaluated1[3])
+    F1star.append(evaluated3[4])
+    plotfraction2.append(evaluated3[3])
+    quality.append(evaluated3[6])
+    completeness.append(evaluated3[5])
+    
+    print('Number of bands',i)
+    print('precision,recall,f1_score,fraction,f1_star,pair_completeness,pair_quality')
+    print('LSH pairs performance',evaluated1)
+    print('LSH pairs found',len(candidatepairs))
+    print('filtered pairs performance', evaluated2)
+    print('LSH pairs found',len(filtered_pairs))
+    print('Clustered pairs performance',evaluated3)
+    print('LSH pairs found',len(clustered_pairs))
+print(F1score)
+print(F1star)
+
+
+
+# In[735]:
+
+
+plt.figure()
+plt.ylabel('Pair quality')
+plt.xlabel('Fraction of comparisons')
+plt.plot(plotfraction2,quality)
+
+plt.figure()
+plt.ylabel('F1 score')
+plt.xlabel('Fraction of comparisons')
+plt.plot(plotfraction1,F1score)
+plt.figure()
+plt.ylabel('F1*')
+plt.xlabel('Fraction of comparisons')
+plt.plot(plotfraction2,F1star)
+plt.figure()
+plt.ylabel('Pair completeness')
+plt.xlabel('Fraction of comparisons')
+plt.plot(plotfraction2,completeness)
+
+
+# ## Bootstrap
+
+# In[741]:
+
+
+#Bootstrap to get multiple metrics and take average to benefit robustness
+evaluated1=[]
+evaluated2=[]
+evaluated3=[]
+
+num_bootstraps=5
+num_bands_range=[50]
+hashf=100
+for _ in range (num_bootstraps):
+    #Different data for each bootstrap with 63% of the sample
+    data=bootstrap(data_full,0.63*1624)
+
+    for i in num_bands_range:
+        #LSH pairs
+        candidatepairs=main(data,hashf,i)[0]
+        #filtered pairs no clustering but same shop different brand removed
+        filtered_pairs=main(data,hashf,i)[5]
+        #clustered pairs
+        dis_matrix=createDissimilarityMatrix(candidatepairs,data,hashf,i,length)
+        clustered_pairs=clusterMethod(dis_matrix,t)
+        #evaluate them all 
+        evaluated1.append(evaluation(candidatepairs,data))
+        evaluated2.append(evaluation(filtered_pairs,data))
+        evaluated3.append(evaluation(clustered_pairs,data))
+
+    
+mean_evaluated1 = np.mean(evaluated1, axis=0)
+mean_evaluated2 = np.mean(evaluated2, axis=0)
+mean_evaluated3 = np.mean(evaluated3, axis=0)
+
+# Print or use mean results as needed
+print('precision,recall,f1_score,fraction,f1_star,pair_completeness,pair_quality')
+print("Mean Results for LSH Pairs:", mean_evaluated1)
+print("Mean Results for Filtered Pairs:", mean_evaluated2)
+print("Mean Results for Clustered Pairs:", mean_evaluated3)
+
+
+# In[ ]:
+
+
+
+
